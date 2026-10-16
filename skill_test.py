@@ -24,6 +24,7 @@
 실행: python skill_test.py
       python skill_test.py --skill <스킬> --target <폴더|파일> [--no-open]   (창 없이 바로 실행)
       python skill_test.py --skill <스킬> --prompt "README 작성해줘" [--target <폴더|파일>]
+      python skill_test.py --skill <스킬> --target a.md --target b.md   (--target을 여러 번 주면 대상 여러 개)
 """
 import argparse
 import fnmatch
@@ -184,7 +185,7 @@ def choose_skill(root, skills):
 
 
 def choose_target(kind, skill):
-    """kind: folder | file | any — 고른 경로, 취소하면 None."""
+    """kind: folder | file | any — 고른 폴더 경로나 파일 경로 목록(여러 개 선택 가능), 취소하면 None."""
     if kind == "any":
         answer = messagebox.askyesnocancel(TITLE, f"[{skill}] 작업 대상을 고릅니다.\n\n예: 폴더 선택\n아니오: 파일 선택")
         if answer is None:
@@ -192,9 +193,45 @@ def choose_target(kind, skill):
         kind = "folder" if answer else "file"
     if kind == "folder":
         path = filedialog.askdirectory(title=f"[{skill}] 작업할 폴더 선택")
-    else:
-        path = filedialog.askopenfilename(title=f"[{skill}] 작업할 파일 선택")
-    return os.path.normpath(path) if path else None
+        return os.path.normpath(path) if path else None
+    paths = filedialog.askopenfilenames(title=f"[{skill}] 작업할 파일 선택 (여러 개 가능)")
+    return [os.path.normpath(p) for p in paths] or None
+
+
+def as_targets(target):
+    """대상 인자(None, 경로 하나, 경로 목록)를 경로 목록으로 맞춘다. 중복은 뺀다."""
+    if not target:
+        return []
+    paths = [target] if isinstance(target, str) else target
+    return list(dict.fromkeys(os.path.normpath(os.path.abspath(p)) for p in paths))
+
+
+def target_kind(targets):
+    if all(os.path.isfile(t) for t in targets):
+        return "파일"
+    return "폴더" if all(os.path.isdir(t) for t in targets) else "폴더/파일"
+
+
+def describe_targets(targets):
+    """지시문에 붙일 대상 줄. 하나면 한 줄, 여러 개면 목록."""
+    kind = target_kind(targets)
+    if len(targets) == 1:
+        return f"- 대상 {kind}: {targets[0]}"
+    return f"- 대상 {kind} {len(targets)}개:\n" + "\n".join(f"  - {t}" for t in targets)
+
+
+def snapshot_targets(targets, exclude=()):
+    """대상 여러 개의 스냅샷을 하나로 합친다. 대상이 여럿이면 키를 전체 경로로 써서 겹치지 않게 한다."""
+    if len(targets) == 1:
+        return snapshot(targets[0], exclude)
+    files = {}
+    for t in targets:
+        part = snapshot(t, exclude)
+        if part is None:
+            return None
+        for rel, stat in part.items():
+            files[os.path.join(t, rel) if os.path.isdir(t) else t] = stat
+    return files
 
 
 def snapshot(path, exclude=()):
@@ -257,29 +294,31 @@ def make_plugin(skill):
 
 
 def build_prompt(skill, target, out_dir, config, allow_changes, user_prompt=""):
-    """지시문 본문은 실행 때 준 프롬프트 → tests/<스킬>.json 의 prompt → 기본 지시문 순으로 고른다."""
-    fields = {"skill": f"{PLUGIN_NAME}:{skill}", "target": target or "", "out_dir": out_dir}
-    kind = "파일" if target and os.path.isfile(target) else "폴더"
+    """지시문 본문은 실행 때 준 프롬프트 → tests/<스킬>.json 의 prompt → 기본 지시문 순으로 고른다.
+    target은 경로 하나나 경로 목록. 여러 개면 {target} 자리에 쉼표로 이어 넣는다."""
+    targets = as_targets(target)
+    fields = {"skill": f"{PLUGIN_NAME}:{skill}", "target": ", ".join(targets), "out_dir": out_dir}
     user_prompt = (user_prompt or "").strip()
     if user_prompt:
         # 직접 쓴 글에는 중괄호가 섞일 수 있으니 format 대신 아는 자리만 바꾼다
         body = user_prompt
         for key, value in fields.items():
             body = body.replace("{" + key + "}", value)
-        if target and "{target}" not in user_prompt:
-            body += f"\n- 대상 {kind}: {target}"
+        if targets and "{target}" not in user_prompt:
+            body += "\n" + describe_targets(targets)
     elif config.get("prompt"):
         body = config["prompt"].format(**fields)
-    elif target:
-        body = (f"{fields['skill']} 스킬을 사용해서 다음 {kind}에 대해 스킬이 하는 작업을 수행해줘.\n"
-                f"- 대상 {kind}: {target}")
+    elif targets:
+        what = f"다음 {target_kind(targets)}" + ("들" if len(targets) > 1 else "")
+        body = (f"{fields['skill']} 스킬을 사용해서 {what}에 대해 스킬이 하는 작업을 수행해줘.\n"
+                + describe_targets(targets))
     else:
         body = f"{fields['skill']} 스킬을 사용해서 스킬이 하는 작업을 수행해줘."
     rules = [f"- 반드시 {fields['skill']} 스킬을 Skill 도구로 불러서 그 지시대로 진행할 것",
              f"- 파일로 만드는 결과물은 모두 {out_dir} 에 저장할 것",
              "- 사용자에게 묻지 말고 합리적인 기본값으로 끝까지 진행할 것 (이 실행은 비대화형 테스트다)",
              "- 브라우저나 뷰어를 직접 열지 말 것 (테스트 프로그램이 연다)"]
-    if target and not allow_changes:
+    if targets and not allow_changes:
         rules.append("- 대상 폴더/파일 안에는 아무 파일도 만들거나 고치지 말 것")
     rules.append("- 마지막에 만든 결과물 파일 목록과 각 파일의 역할을 짧게 정리할 것")
     return body + "\n" + "\n".join(rules)
@@ -287,10 +326,11 @@ def build_prompt(skill, target, out_dir, config, allow_changes, user_prompt=""):
 
 def run_claude(claude, prompt, target, out_dir, plugin_dir, log, on_proc=None):
     # 대상이 없으면 결과 폴더에서 실행한다 — 이 프로그램 폴더에 파일이 생기지 않게
-    add_dirs, cwd = ["--add-dir", out_dir], out_dir
-    if target:
-        add_dirs = ["--add-dir", target if os.path.isdir(target) else os.path.dirname(target)] + add_dirs
-        cwd = HERE
+    # 대상이 여럿이면 각 대상의 폴더(파일이면 그 파일이 있는 폴더)를 모두 연다
+    targets = as_targets(target)
+    dirs = dict.fromkeys(t if os.path.isdir(t) else os.path.dirname(t) for t in targets)
+    add_dirs = [arg for d in [*dirs, out_dir] for arg in ("--add-dir", d)]
+    cwd = HERE if targets else out_dir
     # 프롬프트는 표준입력으로 넘긴다 — Windows의 claude.cmd(cmd.exe)는 인자 속 줄바꿈에서 명령줄을 끊는다
     cmd = [claude, "-p", *add_dirs, "--plugin-dir", plugin_dir,
            "--permission-mode", "acceptEdits",
@@ -346,7 +386,8 @@ def run_claude(claude, prompt, target, out_dir, plugin_dir, log, on_proc=None):
 def main():
     parser = argparse.ArgumentParser(description="skills/의 스킬을 골라 폴더, 파일, 프롬프트로 실행해 보고 결과물을 검사한다.")
     parser.add_argument("--skill", help="skills/ 아래 스킬 이름 (주면 선택 창을 건너뛴다)")
-    parser.add_argument("--target", help="작업할 폴더나 파일 (주면 탐색기를 건너뛴다)")
+    parser.add_argument("--target", action="append",
+                        help="작업할 폴더나 파일 (주면 탐색기를 건너뛴다). 여러 번 주면 대상이 여러 개")
     parser.add_argument("--prompt", help="Claude에게 줄 지시문. 주면 대상 없이도 실행한다")
     parser.add_argument("--prompt-file", help="지시문을 담은 텍스트 파일 (--prompt 대신)")
     parser.add_argument("--no-open", action="store_true", help="끝나고 결과를 열지 않는다")
@@ -373,17 +414,25 @@ def main():
 
 def execute(claude, skill, target, stamp, log, config, on_proc=None, user_prompt=""):
     """3~4단계 — 스킬을 대상(없으면 프롬프트만)으로 실행하고 결과를 검사해 report(dict)를 돌려준다.
-    report.json도 저장한다."""
-    target = target or None
-    target_name = (os.path.splitext(os.path.basename(target))[0] or "target") if target else "prompt"
+    target은 None, 경로 하나, 경로 목록 중 하나. report.json도 저장한다."""
+    targets = as_targets(target)
+    if targets:
+        target_name = os.path.splitext(os.path.basename(targets[0]))[0] or "target"
+        if len(targets) > 1:
+            target_name += f"_외{len(targets) - 1}개"
+    else:
+        target_name = "prompt"
     log.open(f"{skill}_{target_name}")
     out_dir = os.path.join(RESULTS_DIR, skill, f"{target_name}_{stamp}")
     os.makedirs(out_dir, exist_ok=True)
     allow_changes = bool(config.get("allow_target_changes"))
-    prompt = build_prompt(skill, target, out_dir, config, allow_changes, user_prompt)
+    prompt = build_prompt(skill, targets, out_dir, config, allow_changes, user_prompt)
 
     log.write(f"스킬: {skill}")
-    log.write(f"대상: {target or '없음 (프롬프트만)'}")
+    if len(targets) > 1:
+        log.write(f"대상: {len(targets)}개\n" + "\n".join(f"  - {t}" for t in targets))
+    else:
+        log.write(f"대상: {targets[0] if targets else '없음 (프롬프트만)'}")
     log.write(f"결과: {out_dir}")
     log.write(f"로그: {log.path}\n")
     log.write("지시문:\n" + prompt, echo=False)
@@ -391,19 +440,19 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None, user_prompt
     # 3. 실행
     # 대상이 이 프로그램 폴더를 품고 있으면, 실행 중 우리가 쓰는 결과·로그는 변경으로 치지 않는다
     own_dirs = (RESULTS_DIR, LOGS_DIR)
-    before = snapshot(target, own_dirs) if target else None
-    if target:
+    before = snapshot_targets(targets, own_dirs) if targets else None
+    if targets:
         log.write(f"대상 스냅샷(실행 전): {'파일 ' + str(len(before)) + '개' if before is not None else '너무 커서 생략'}",
                   echo=False)
     plugin_dir = make_plugin(skill)
     log.write(f"임시 플러그인: {plugin_dir}", echo=False)
     started = time.time()
     try:
-        summary = run_claude(claude, prompt, target, out_dir, plugin_dir, log, on_proc)
+        summary = run_claude(claude, prompt, targets, out_dir, plugin_dir, log, on_proc)
     finally:
         shutil.rmtree(plugin_dir, ignore_errors=True)
     log.write(f"claude 종료 코드: {summary.get('exit_code')}", echo=False)
-    after = snapshot(target, own_dirs) if target else None
+    after = snapshot_targets(targets, own_dirs) if targets else None
     response = os.path.join(out_dir, RESPONSE_FILE)
     with open(response, "w", encoding="utf-8") as f:
         f.write(summary.get("final_text") or "")
@@ -418,14 +467,16 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None, user_prompt
         "Claude 실행 성공": summary.get("exit_code") == 0 and not (summary.get("result") or {}).get("is_error", True),
         "스킬 호출됨": summary["skill_invoked"],
         # 프롬프트만 주는 스킬은 답이 글(response.md)일 수 있으니, 파일이 없으면 건너뜀으로 둔다
-        "결과물 생성됨": bool(outputs) if target or outputs else None,
+        "결과물 생성됨": bool(outputs) if targets or outputs else None,
         **{f"기대 결과물 {p}": bool(found) for p, found in expect_results.items()},
     }
-    if target and not allow_changes:
+    if targets and not allow_changes:
         checks["대상 변경 없음"] = not changed if target_changes is not None else None
 
     report = {
-        "skill": skill, "target": target, "out_dir": out_dir, "started": stamp,
+        # target은 대상이 하나면 경로, 여럿이면 목록, 없으면 null. targets는 언제나 목록
+        "skill": skill, "target": targets[0] if len(targets) == 1 else (targets or None), "targets": targets,
+        "out_dir": out_dir, "started": stamp,
         "elapsed_sec": round(time.time() - started), "prompt": prompt, "response": response,
         "passed": all(v is not False for v in checks.values()),
         "checks": checks, "outputs": outputs, "expect": expect_results,
@@ -491,9 +542,10 @@ def run(args, stamp, log):
 
     # 2. 대상 고르기
     if args.target:
-        target = os.path.normpath(os.path.abspath(args.target))
-        if not os.path.exists(target):
-            return fail(f"대상이 없습니다: {target}")
+        target = as_targets(args.target)
+        missing = [t for t in target if not os.path.exists(t)]
+        if missing:
+            return fail("대상이 없습니다: " + ", ".join(missing))
     elif user_prompt.strip() or config.get("target") == "none":
         target = None  # 대상 없이 프롬프트만으로 실행
     else:

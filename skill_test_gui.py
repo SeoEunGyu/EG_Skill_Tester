@@ -132,23 +132,41 @@ class App:
         row.pack(fill="x")
         self.mode = tk.StringVar(value=MODES[0])
         self.mode_box = ttk.Combobox(row, textvariable=self.mode, values=MODES, state="readonly", width=8, font=FONT)
-        self.mode_box.pack(side="left")
+        self.mode_box.pack(side="left", anchor="n")
         self.mode_box.bind("<<ComboboxSelected>>", lambda _: self.on_mode_change())
 
-        # 폴더, 파일: 경로 입력칸과 선택 버튼 (셀렉트 오른쪽)
+        # 폴더: 경로 입력칸과 선택 버튼 (셀렉트 오른쪽)
         self.path_row = ttk.Frame(row)
         self.target = tk.StringVar()
         ttk.Entry(self.path_row, textvariable=self.target, font=FONT).pack(side="left", fill="x", expand=True)
         self.btn_folder = self.icon_button(self.path_row, "folder", "폴더 선택", lambda: self.pick_target("folder"))
-        self.btn_file = self.icon_button(self.path_row, "file", "파일 선택", lambda: self.pick_target("file"))
+        self.btn_folder.pack(side="left", padx=(6, 0))
 
-        # 프롬프트: 여러 줄 입력칸 (셀렉트 아래). 비우면 tests/<스킬>.json 의 prompt를 쓴다
+        # 파일: 여러 개를 담는 목록과 추가, 빼기 버튼 (셀렉트 오른쪽)
+        self.files = []
+        self.files_row = ttk.Frame(row)
+        self.file_box = tk.Listbox(self.files_row, font=FONT, height=3, selectmode="extended", activestyle="none",
+                                   exportselection=False, relief="solid", borderwidth=1)
+        self.file_box.pack(side="left", fill="x", expand=True)
+        self.file_box.bind("<Delete>", lambda _: self.remove_files())
+        file_buttons = ttk.Frame(self.files_row)
+        file_buttons.pack(side="left", fill="y", padx=(6, 0))
+        self.btn_file = self.icon_button(file_buttons, "file", "파일 추가 (여러 개 선택 가능)",
+                                         lambda: self.pick_target("file"))
+        self.btn_file.pack()
+        self.btn_remove = self.icon_button(file_buttons, "x", "고른 파일 빼기 (Delete)", self.remove_files, "x-gray")
+        self.btn_remove.pack(pady=(4, 0))
+        self.refresh_files()
+
+        # 프롬프트: 여러 줄 입력칸 (셀렉트 아래). 폴더, 파일과 함께 쓸 수도 있다
+        # 비우면 tests/<스킬>.json 의 prompt, 그것도 없으면 기본 지시문을 쓴다
         self.prompt_row = ttk.Frame(tgt)
         self.prompt = tk.Text(self.prompt_row, font=FONT, height=4, wrap="word", undo=True, relief="solid",
                               borderwidth=1, background="#ffffff", foreground="#1f2328", insertbackground="#1f2328")
         self.prompt.pack(fill="x")
         self.prompt.bind("<Control-Return>", lambda _: (self.start(), "break")[1])
-        ttk.Label(self.prompt_row, text="Ctrl+Enter로 실행", foreground="#6e7781").pack(anchor="w", pady=(2, 0))
+        self.prompt_hint = tk.StringVar()
+        ttk.Label(self.prompt_row, textvariable=self.prompt_hint, foreground="#6e7781").pack(anchor="w", pady=(2, 0))
         self.on_mode_change()
 
         # 실행 · 중지 · 결과 열기
@@ -285,26 +303,54 @@ class App:
         self.on_mode_change()
 
     def on_mode_change(self):
-        """셀렉트에서 고른 종류에 맞는 입력칸만 보이게 한다."""
+        """폴더면 경로 입력칸, 파일이면 파일 목록을 프롬프트(선택)와 함께, 프롬프트면 프롬프트 입력칸만 보이게 한다."""
         mode = self.mode.get()
-        for widget in (self.path_row, self.prompt_row, self.btn_folder, self.btn_file):
+        for widget in (self.path_row, self.files_row, self.prompt_row):
             widget.pack_forget()
         if mode == "프롬프트":
-            self.prompt_row.pack(fill="x", pady=(int(6 * self.scale), 0))
+            self.prompt_hint.set("Ctrl+Enter로 실행")
         else:
-            self.path_row.pack(side="left", fill="x", expand=True, padx=(6, 0))
-            (self.btn_folder if mode == "폴더" else self.btn_file).pack(side="left", padx=(6, 0))
+            (self.path_row if mode == "폴더" else self.files_row).pack(side="left", fill="x", expand=True,
+                                                                       padx=(6, 0))
+            self.prompt_hint.set("비워도 됩니다. {target}은 경로로 바뀝니다. Ctrl+Enter로 실행")
+        self.prompt_row.pack(fill="x", pady=(int(6 * self.scale), 0))
 
     def pick_target(self, kind):
         skill = self.selected_skill() or ""
-        start = self.target.get().strip()
-        start = start if os.path.isdir(start) else os.path.dirname(start) if start else None
         if kind == "folder":
+            start = self.target.get().strip()
+            start = start if os.path.isdir(start) else os.path.dirname(start) if start else None
             path = filedialog.askdirectory(title=f"[{skill}] 작업할 폴더 선택", initialdir=start)
-        else:
-            path = filedialog.askopenfilename(title=f"[{skill}] 작업할 파일 선택", initialdir=start)
-        if path:
-            self.target.set(os.path.normpath(path))
+            if path:
+                self.target.set(os.path.normpath(path))
+            return
+        # 파일은 여러 개를 고를 수 있고, 고를 때마다 목록에 더한다 (같은 파일은 한 번만)
+        start = os.path.dirname(self.files[-1]) if self.files else None
+        paths = filedialog.askopenfilenames(title=f"[{skill}] 작업할 파일 선택 (여러 개 가능)", initialdir=start)
+        for path in paths:
+            path = os.path.normpath(path)
+            if path not in self.files:
+                self.files.append(path)
+        self.refresh_files()
+
+    def remove_files(self):
+        if not self.files:
+            return
+        for idx in sorted(self.file_box.curselection(), reverse=True):
+            del self.files[idx]
+        self.refresh_files()
+
+    def refresh_files(self):
+        """파일 목록을 다시 그린다. 비어 있으면 안내 문구를 회색으로 보여 준다."""
+        self.file_box.delete(0, "end")
+        for path in self.files:
+            self.file_box.insert("end", path)
+        if not self.files:
+            self.file_box.insert("end", "파일 추가 버튼으로 고르세요 (여러 개 가능)")
+            self.file_box.itemconfigure(0, foreground="#8c959f", selectforeground="#8c959f",
+                                        selectbackground="#ffffff")
+        running = bool(self.worker and self.worker.is_alive())
+        self.btn_remove.configure(state="normal" if self.files and not running else "disabled")
 
     # ---------- 실행 ----------
     def set_running(self, running):
@@ -314,6 +360,9 @@ class App:
         self.skill_box.configure(state=idle)
         self.prompt.configure(state=idle)
         self.mode_box.configure(state="disabled" if running else "readonly")
+        self.file_box.configure(state=idle)
+        self.btn_file.configure(state=idle)
+        self.btn_remove.configure(state="normal" if self.files and not running else "disabled")
         has_report = "normal" if (self.report and not running) else "disabled"
         for b in (self.btn_open, self.btn_dir, self.btn_log):
             b.configure(state=has_report)
@@ -327,20 +376,27 @@ class App:
             return messagebox.showerror(st.TITLE, "claude CLI를 찾을 수 없습니다. Claude Code를 설치하세요.")
         if not skill:
             return messagebox.showwarning(st.TITLE, "스킬을 고르세요.")
+        prompt = self.prompt.get("1.0", "end").strip()
         if mode == "프롬프트":
-            target, prompt = None, self.prompt.get("1.0", "end").strip()
+            target = None
             if not prompt and not self.config.get("prompt"):
                 return messagebox.showwarning(st.TITLE, "프롬프트를 입력하세요.")
-        else:
-            target, prompt = self.target.get().strip().strip('"'), ""
-            obj, subj = ("폴더를", "폴더가") if mode == "폴더" else ("파일을", "파일이")
+        elif mode == "폴더":
+            target = self.target.get().strip().strip('"')
             if not target:
-                return messagebox.showwarning(st.TITLE, f"작업할 {obj} 고르세요.")
+                return messagebox.showwarning(st.TITLE, "작업할 폴더를 고르세요.")
             target = os.path.normpath(os.path.abspath(target))
             if not os.path.exists(target):
                 return messagebox.showerror(st.TITLE, f"대상이 없습니다:\n{target}")
-            if (mode == "폴더") != os.path.isdir(target):
-                return messagebox.showwarning(st.TITLE, f"{subj} 아닙니다:\n{target}")
+            if not os.path.isdir(target):
+                return messagebox.showwarning(st.TITLE, f"폴더가 아닙니다:\n{target}")
+        else:
+            target = list(self.files)
+            if not target:
+                return messagebox.showwarning(st.TITLE, "작업할 파일을 고르세요.")
+            missing = [p for p in target if not os.path.isfile(p)]
+            if missing:
+                return messagebox.showerror(st.TITLE, "없는 파일이 있습니다:\n" + "\n".join(missing))
 
         self.report = None
         self.stopped = False
