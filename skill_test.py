@@ -193,14 +193,17 @@ def choose_target(kind, skill):
     return os.path.normpath(path) if path else None
 
 
-def snapshot(path):
-    """대상이 바뀌었는지 보려고 (상대경로 → (크기, 수정시각))을 모은다. 너무 크면 None."""
+def snapshot(path, exclude=()):
+    """대상이 바뀌었는지 보려고 (상대경로 → (크기, 수정시각))을 모은다. 너무 크면 None.
+    exclude 폴더(이 프로그램의 results/·logs/ 등)는 대상 안에 있어도 건너뛴다."""
+    skip = {os.path.normcase(os.path.abspath(p)) for p in exclude}
     if os.path.isfile(path):
         st = os.stat(path)
         return {os.path.basename(path): (st.st_size, st.st_mtime_ns)}
     files = {}
     for dirpath, dirnames, filenames in os.walk(path):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
+                       and os.path.normcase(os.path.join(dirpath, d)) not in skip]
         for name in filenames:
             full = os.path.join(dirpath, name)
             try:
@@ -363,7 +366,9 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None):
     log.write("지시문:\n" + prompt, echo=False)
 
     # 3. 실행
-    before = snapshot(target)
+    # 대상이 이 프로그램 폴더를 품고 있으면, 실행 중 우리가 쓰는 결과·로그는 변경으로 치지 않는다
+    own_dirs = (RESULTS_DIR, LOGS_DIR)
+    before = snapshot(target, own_dirs)
     log.write(f"대상 스냅샷(실행 전): {'파일 ' + str(len(before)) + '개' if before is not None else '너무 커서 생략'}",
               echo=False)
     plugin_dir = make_plugin(skill)
@@ -374,7 +379,7 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None):
     finally:
         shutil.rmtree(plugin_dir, ignore_errors=True)
     log.write(f"claude 종료 코드: {summary.get('exit_code')}", echo=False)
-    after = snapshot(target)
+    after = snapshot(target, own_dirs)
 
     # 4. 결과 검사
     outputs = list_outputs(out_dir)

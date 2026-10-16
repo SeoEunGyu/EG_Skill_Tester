@@ -10,6 +10,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 from tkinter.scrolledtext import ScrolledText
 
 import skill_test as st
@@ -81,7 +82,9 @@ class App:
         root.minsize(int(460 * scale), int(420 * scale))
         style = ttk.Style()
         style.configure(".", font=FONT)
-        style.configure("Treeview", rowheight=24)
+        # 검사 결과 줄 높이 — 고정 px이면 고배율 화면에서 글자가 겹치므로 글꼴 높이로 정한다
+        line = tkfont.Font(root=root, font=FONT).metrics("linespace")
+        style.configure("Treeview", rowheight=line + int(6 * scale))
         # 실행·중지 버튼은 기본 버튼 높이의 1.5배 — 위아래 여백을 늘린다
         base = ttk.Button(root, text="가").winfo_reqheight()
         extra = max(1, round(base * 0.25))
