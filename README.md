@@ -4,43 +4,45 @@ Claude Code 스킬을 실제 프로젝트에 적용해 보고 결과물을 검�
 
 `skills/` 폴더에 넣은 스킬 하나를 고르고 작업할 폴더나 파일을 정하면, Claude Code CLI가 **그 스킬만 담은 임시 플러그인**으로 작업합니다. 끝나면 결과물이 제대로 나왔는지, 스킬이 실제로 호출됐는지, 대상 폴더를 건드리지 않았는지 검사합니다.
 
-## 준비
+## 요구사항
 
-- **Windows** — 결과 열기·프로세스 중지에 Windows 기능(`os.startfile`, `taskkill`)을 씁니다.
-- **Python 3** (tkinter 포함, 3.12에서 확인). 추가로 설치할 패키지는 없습니다.
-- **Claude Code CLI** — `claude` 명령이 PATH에 있고 로그인되어 있어야 합니다.
+| 항목 | 내용 | 확인 명령 |
+|---|---|---|
+| OS | Windows 10 / 11 — 결과 열기·실행 중지에 Windows 기능(`os.startfile`, `taskkill`)을 씁니다. | |
+| Python | 3.x, **tkinter 포함** (python.org 설치본에는 기본 포함, 3.12에서 확인) | `python --version`<br>`python -m tkinter` (작은 창이 뜨면 OK) |
+| Claude Code CLI | `claude` 명령이 PATH에 있고 로그인되어 있어야 합니다. | `claude --version` |
+| Node.js | Claude Code CLI를 npm으로 설치할 때만 필요 | `node --version` |
 
-  ```bash
-  npm install -g @anthropic-ai/claude-code
-  claude        # 처음 한 번 로그인
-  ```
+추가로 설치할 Python 패키지는 없습니다 (표준 라이브러리만 사용).
 
-## 폴더 구성
+## 실행 방법
 
+### 1. 설치
+
+```bash
+git clone <저장소 주소>
+cd EG_Skill_Tester
+
+# Claude Code CLI가 없다면 설치 후 한 번 로그인
+npm install -g @anthropic-ai/claude-code
+claude
 ```
-EG_Skill_Tester/
-├─ skill_test_gui.py   GUI (권장)
-├─ skill_test.py       명령줄 실행 · 실행/검사 로직
-├─ assets/icons/       GUI 아이콘 (Lucide)
-├─ skills/             테스트할 스킬 — <스킬>/SKILL.md      (git 제외)
-├─ tests/              스킬별 테스트 설정 — <스킬>.json (선택)
-├─ results/            결과물 — <스킬>/<대상>_<시각>/       (git 제외)
-└─ logs/               진행 로그 — <시각>_<스킬>_<대상>.log  (git 제외)
-```
 
-`skills/`, `results/`, `logs/`의 내용은 `.gitignore`로 저장소에서 빠집니다. 스킬은 각자 `skills/` 아래에 폴더째 넣어 쓰세요.
+### 2. 테스트할 스킬 넣기
+
+`skills/` 아래에 스킬 폴더를 통째로 복사합니다. 폴더 안에 `SKILL.md`가 있어야 목록에 나옵니다.
 
 ```
 skills/
 └─ my-skill/
-   ├─ SKILL.md        ← 이 파일이 있어야 목록에 나옵니다
+   ├─ SKILL.md
    ├─ references/
    └─ scripts/
 ```
 
-## 사용법
+필요하면 `tests/my-skill.json`으로 스킬별 테스트 설정을 둡니다 ([아래](#스킬별-테스트-설정-선택) 참고).
 
-### GUI
+### 3. 실행 — GUI (권장)
 
 ```bash
 python skill_test_gui.py
@@ -54,13 +56,31 @@ python skill_test_gui.py
    - 제목 줄 오른쪽 버튼: 검사 결과(HTML 등) 열기, 결과 폴더 열기, 로그 파일 열기
    - **끝나면 결과 열기**를 켜 두면 완료 후 자동으로 엽니다.
 
-### 명령줄
+### 4. 실행 — 명령줄
 
 ```bash
 python skill_test.py                                   # 선택 창을 차례로 띄움
 python skill_test.py --skill <스킬> --target <경로>     # 창 없이 바로 실행
 python skill_test.py --skill <스킬> --target <경로> --no-open
 ```
+
+결과는 `results/<스킬>/<대상>_<시각>/`, 로그는 `logs/`에 남습니다.
+
+## 폴더 구성
+
+```
+EG_Skill_Tester/
+├─ skill_test_gui.py   GUI (권장)
+├─ skill_test.py       명령줄 실행 · 실행/검사 로직
+├─ assets/icons/       GUI 아이콘 (Lucide)
+├─ LICENSE             PolyForm Noncommercial 1.0.0
+├─ skills/             테스트할 스킬 — <스킬>/SKILL.md      (git 제외)
+├─ tests/              스킬별 테스트 설정 — <스킬>.json (선택)
+├─ results/            결과물 — <스킬>/<대상>_<시각>/       (git 제외)
+└─ logs/               진행 로그 — <시각>_<스킬>_<대상>.log  (git 제외)
+```
+
+`skills/`, `results/`, `logs/`의 내용은 `.gitignore`로 저장소에서 빠집니다. 스킬은 각자 `skills/` 아래에 넣어 쓰세요.
 
 ## 동작 방식
 
@@ -116,6 +136,10 @@ python skill_test.py --skill <스킬> --target <경로> --no-open
 - `logs/<시각>_<스킬>_<대상>.log` — 단계 · Claude 발화 · 도구 호출 입력과 결과 (시각 포함)
 - `logs/<시각>_<스킬>_<대상>.jsonl` — `claude --output-format stream-json` 원본 이벤트
 
-## 라이선스 참고
+## 라이선스
 
-`assets/icons/`의 아이콘은 [Lucide](https://lucide.dev) (ISC 라이선스) v0.460.0의 SVG와, 이를 18·27·36px PNG로 변환한 파일입니다.
+이 프로젝트는 [PolyForm Noncommercial License 1.0.0](LICENSE)을 따릅니다. **비상업적 용도**(개인 학습·연구, 비영리 단체 등)로는 자유롭게 사용·수정·배포할 수 있으며, **상업적 사용은 허용되지 않습니다.**
+
+Copyright (c) 2026 SeoEunGyu
+
+GUI 아이콘은 [Lucide](https://lucide.dev)를 사용했습니다.
