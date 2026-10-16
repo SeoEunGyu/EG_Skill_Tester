@@ -1,4 +1,4 @@
-"""스킬 테스트 GUI — skill_test.py 의 흐름(스킬 선택 → 대상 선택 → 실행 → 결과 검사)을 창 하나에서 한다.
+"""스킬 테스트 GUI — skill_test.py 의 흐름(스킬 선택 → 대상 선택, 프롬프트 입력 → 실행 → 결과 검사)을 창 하나에서 한다.
 
 실행: python skill_test_gui.py   (콘솔 없이: pythonw skill_test_gui.py)
 """
@@ -18,6 +18,7 @@ import skill_test as st
 ICONS_DIR = os.path.join(st.HERE, "assets", "icons")  # Lucide 아이콘(ISC) — SVG 원본과 18/27/36px PNG
 FONT = ("Malgun Gothic", 10)
 MONO = ("Consolas", 10)
+MODES = ("폴더", "파일", "프롬프트")  # 작업 대상 셀렉트의 선택지
 
 
 class GuiLog(st.RunLog):
@@ -77,9 +78,9 @@ class App:
         scale = self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w = min(int(560 * scale), sw - int(40 * scale))
-        h = min(int(460 * scale), sh - int(90 * scale))
+        h = min(int(560 * scale), sh - int(90 * scale))
         root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 3}")
-        root.minsize(int(460 * scale), int(420 * scale))
+        root.minsize(int(460 * scale), int(520 * scale))
         style = ttk.Style()
         style.configure(".", font=FONT)
         # 검사 결과 줄 높이 — 고정 px이면 고배율 화면에서 글자가 겹치므로 글꼴 높이로 정한다
@@ -104,7 +105,7 @@ class App:
             self.status.set("claude CLI를 찾을 수 없습니다. Claude Code를 설치하세요.")
         self.root.after(100, self.pump)
 
-    # ---------- 화면 구성 (세로 1열: 스킬 → 대상 → 실행 버튼 → 로그 → 검사 결과) ----------
+    # ---------- 화면 구성 (세로 1열: 스킬 → 대상 → 프롬프트 → 실행 버튼 → 로그 → 검사 결과) ----------
     def _build(self, root):
         frame = ttk.Frame(root, padding=10)
         frame.pack(fill="both", expand=True)
@@ -124,15 +125,31 @@ class App:
         self.skill_box.pack(fill="x", pady=(int(6 * self.scale), 0))
         self.skill_box.bind("<<ListboxSelect>>", lambda _: self.on_skill_select())
 
-        # 작업 대상
+        # 작업 대상 — 셀렉트로 종류(폴더, 파일, 프롬프트)를 고르면 그 종류에 맞는 입력칸만 보인다
         tgt = ttk.LabelFrame(frame, text="작업 대상", style="Section.TLabelframe", padding=8)
         tgt.pack(fill="x", pady=(10, 0))
+        row = ttk.Frame(tgt)
+        row.pack(fill="x")
+        self.mode = tk.StringVar(value=MODES[0])
+        self.mode_box = ttk.Combobox(row, textvariable=self.mode, values=MODES, state="readonly", width=8, font=FONT)
+        self.mode_box.pack(side="left")
+        self.mode_box.bind("<<ComboboxSelected>>", lambda _: self.on_mode_change())
+
+        # 폴더, 파일: 경로 입력칸과 선택 버튼 (셀렉트 오른쪽)
+        self.path_row = ttk.Frame(row)
         self.target = tk.StringVar()
-        ttk.Entry(tgt, textvariable=self.target, font=FONT).pack(side="left", fill="x", expand=True)
-        self.btn_folder = self.icon_button(tgt, "folder", "폴더 선택", lambda: self.pick_target("folder"), "folder-gray")
-        self.btn_folder.pack(side="left", padx=(6, 0))
-        self.btn_file = self.icon_button(tgt, "file", "파일 선택", lambda: self.pick_target("file"), "file-gray")
-        self.btn_file.pack(side="left", padx=(4, 0))
+        ttk.Entry(self.path_row, textvariable=self.target, font=FONT).pack(side="left", fill="x", expand=True)
+        self.btn_folder = self.icon_button(self.path_row, "folder", "폴더 선택", lambda: self.pick_target("folder"))
+        self.btn_file = self.icon_button(self.path_row, "file", "파일 선택", lambda: self.pick_target("file"))
+
+        # 프롬프트: 여러 줄 입력칸 (셀렉트 아래). 비우면 tests/<스킬>.json 의 prompt를 쓴다
+        self.prompt_row = ttk.Frame(tgt)
+        self.prompt = tk.Text(self.prompt_row, font=FONT, height=4, wrap="word", undo=True, relief="solid",
+                              borderwidth=1, background="#ffffff", foreground="#1f2328", insertbackground="#1f2328")
+        self.prompt.pack(fill="x")
+        self.prompt.bind("<Control-Return>", lambda _: (self.start(), "break")[1])
+        ttk.Label(self.prompt_row, text="Ctrl+Enter로 실행", foreground="#6e7781").pack(anchor="w", pady=(2, 0))
+        self.on_mode_change()
 
         # 실행 · 중지 · 결과 열기
         bar = ttk.Frame(frame)
@@ -259,9 +276,24 @@ class App:
             config = {}
             self.status.set(f"tests/{skill}.json 읽기 실패 — 기본 설정으로 실행합니다: {e}")
         self.config = config
+        # 테스트 설정의 target에 맞는 종류만 셀렉트에 둔다. 프롬프트는 언제나 고를 수 있다
         kind = config.get("target", "any")
-        self.btn_folder.configure(state="disabled" if kind == "file" else "normal")
-        self.btn_file.configure(state="disabled" if kind == "folder" else "normal")
+        modes = {"folder": ["폴더"], "file": ["파일"], "none": []}.get(kind, ["폴더", "파일"]) + ["프롬프트"]
+        self.mode_box.configure(values=modes)
+        if self.mode.get() not in modes:
+            self.mode.set(modes[0])
+        self.on_mode_change()
+
+    def on_mode_change(self):
+        """셀렉트에서 고른 종류에 맞는 입력칸만 보이게 한다."""
+        mode = self.mode.get()
+        for widget in (self.path_row, self.prompt_row, self.btn_folder, self.btn_file):
+            widget.pack_forget()
+        if mode == "프롬프트":
+            self.prompt_row.pack(fill="x", pady=(int(6 * self.scale), 0))
+        else:
+            self.path_row.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            (self.btn_folder if mode == "폴더" else self.btn_file).pack(side="left", padx=(6, 0))
 
     def pick_target(self, kind):
         skill = self.selected_skill() or ""
@@ -280,25 +312,35 @@ class App:
         self.btn_run.configure(state=idle)
         self.btn_stop.configure(state="normal" if running else "disabled")
         self.skill_box.configure(state=idle)
+        self.prompt.configure(state=idle)
+        self.mode_box.configure(state="disabled" if running else "readonly")
         has_report = "normal" if (self.report and not running) else "disabled"
         for b in (self.btn_open, self.btn_dir, self.btn_log):
             b.configure(state=has_report)
 
     def start(self):
         skill = self.selected_skill()
-        target = self.target.get().strip().strip('"')
+        if self.worker and self.worker.is_alive():
+            return
+        mode = self.mode.get()
         if not self.claude:
             return messagebox.showerror(st.TITLE, "claude CLI를 찾을 수 없습니다. Claude Code를 설치하세요.")
         if not skill:
             return messagebox.showwarning(st.TITLE, "스킬을 고르세요.")
-        if not target:
-            return messagebox.showwarning(st.TITLE, "작업 대상(폴더 또는 파일)을 고르세요.")
-        target = os.path.normpath(os.path.abspath(target))
-        if not os.path.exists(target):
-            return messagebox.showerror(st.TITLE, f"대상이 없습니다:\n{target}")
-        kind = self.config.get("target", "any")
-        if (kind == "folder" and not os.path.isdir(target)) or (kind == "file" and not os.path.isfile(target)):
-            return messagebox.showwarning(st.TITLE, f"이 스킬은 대상으로 {'폴더' if kind == 'folder' else '파일'}를 받습니다.")
+        if mode == "프롬프트":
+            target, prompt = None, self.prompt.get("1.0", "end").strip()
+            if not prompt and not self.config.get("prompt"):
+                return messagebox.showwarning(st.TITLE, "프롬프트를 입력하세요.")
+        else:
+            target, prompt = self.target.get().strip().strip('"'), ""
+            obj, subj = ("폴더를", "폴더가") if mode == "폴더" else ("파일을", "파일이")
+            if not target:
+                return messagebox.showwarning(st.TITLE, f"작업할 {obj} 고르세요.")
+            target = os.path.normpath(os.path.abspath(target))
+            if not os.path.exists(target):
+                return messagebox.showerror(st.TITLE, f"대상이 없습니다:\n{target}")
+            if (mode == "폴더") != os.path.isdir(target):
+                return messagebox.showwarning(st.TITLE, f"{subj} 아닙니다:\n{target}")
 
         self.report = None
         self.stopped = False
@@ -309,17 +351,17 @@ class App:
         self.started = time.time()
         self.set_running(True)
         config = dict(self.config)
-        self.worker = threading.Thread(target=self.work, args=(skill, target, config), daemon=True)
+        self.worker = threading.Thread(target=self.work, args=(skill, target, config, prompt), daemon=True)
         self.worker.start()
         self.tick()
 
-    def work(self, skill, target, config):
+    def work(self, skill, target, config, prompt):
         stamp = time.strftime("%Y%m%d_%H%M%S")
         log = GuiLog(stamp, self.events)
-        log.write(f"skill_test_gui 시작 · 스킬={skill} · 대상={target}", echo=False)
+        log.write(f"skill_test_gui 시작 · 스킬={skill} · 대상={target} · 프롬프트={prompt!r}", echo=False)
         try:
             report = st.execute(self.claude, skill, target, stamp, log, config,
-                                on_proc=lambda p: setattr(self, "proc", p))
+                                on_proc=lambda p: setattr(self, "proc", p), user_prompt=prompt)
             self.events.put(("done", (report, config)))
         except Exception:
             import traceback
@@ -394,7 +436,9 @@ class App:
         claude = report["claude"].get("result") or {}
         self.status.set(f"종합: {verdict} · {report['elapsed_sec']}초 · "
                         f"${claude.get('total_cost_usd') or 0:.2f} · {report['out_dir']}")
-        if self.auto_open.get() and not self.stopped and report["outputs"]:
+        response = report.get("response") or ""
+        has_response = os.path.isfile(response) and os.path.getsize(response) > 0
+        if self.auto_open.get() and not self.stopped and (report["outputs"] or has_response):
             self.open_result()
 
     # ---------- 결과 열기 ----------

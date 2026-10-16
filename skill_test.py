@@ -1,9 +1,10 @@
-"""skills/ 아래 배포용 스킬 하나를 골라, 탐색기로 고른 폴더나 파일에 적용해 보고 결과물을 검사한다.
+"""skills/ 아래 배포용 스킬 하나를 골라, 탐색기로 고른 폴더나 파일 또는 직접 쓴 프롬프트로 실행해 보고 결과물을 검사한다.
 
 흐름
 1. skills/<스킬>/SKILL.md 가 있는 스킬 목록에서 하나 고르기
-2. 작업 대상(폴더 또는 파일)을 탐색기로 고르기
+2. 작업 대상(폴더 또는 파일)을 탐색기로 고르기. 프롬프트(--prompt)를 주면 대상 없이도 실행한다
 3. Claude Code CLI(claude -p)가 그 스킬만 담은 임시 플러그인으로 작업 — 결과는 results/<스킬>/<대상>_<시각>/
+   (대상이 없으면 <대상> 자리에 prompt). Claude의 마지막 응답은 response.md 로 남긴다
 4. 결과 검사: 만들어진 파일 목록, 기대 결과물(tests/<스킬>.json의 expect) 충족 여부, 대상이 바뀌었는지
    → report.json 저장 후 결과 폴더(와 HTML)를 연다
 
@@ -12,8 +13,9 @@
 
 스킬별 테스트 설정(선택) — tests/<스킬>.json
 {
-  "target": "folder" | "file" | "any",       # 탐색기에서 고를 대상 종류 (기본 any: 실행 때 묻는다)
+  "target": "folder" | "file" | "any" | "none",  # 대상 종류 (기본 any: 실행 때 묻는다, none: 대상 없이 실행)
   "prompt": "... {target} ... {out_dir} ...",  # 지시문. {skill} {target} {out_dir} 치환. 없으면 기본 지시문
+                                               # 실행 때 준 프롬프트(--prompt, GUI 입력)가 있으면 그것이 우선
   "expect": ["architecture.html", "*.md"],     # 결과 폴더에 있어야 할 파일(glob, 하위 폴더는 **/)
   "allow_target_changes": false,               # 대상 폴더/파일 수정을 허용하는 스킬이면 true
   "open": ["architecture.html"]                # 끝나고 열 파일(glob). 없으면 첫 HTML, 그것도 없으면 폴더
@@ -21,6 +23,7 @@
 
 실행: python skill_test.py
       python skill_test.py --skill <스킬> --target <폴더|파일> [--no-open]   (창 없이 바로 실행)
+      python skill_test.py --skill <스킬> --prompt "README 작성해줘" [--target <폴더|파일>]
 """
 import argparse
 import fnmatch
@@ -42,6 +45,7 @@ LOGS_DIR = os.path.join(HERE, "logs")
 PLUGIN_NAME = "skill-test"
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "bin", "obj", "build", "dist", ".gradle", ".idea"}
 TITLE = "스킬 테스트"
+RESPONSE_FILE = "response.md"  # Claude의 마지막 응답. 결과물 목록과 검사에서는 뺀다
 
 
 class RunLog:
@@ -231,7 +235,7 @@ def list_outputs(out_dir):
     for dirpath, _, filenames in os.walk(out_dir):
         for name in filenames:
             rel = os.path.relpath(os.path.join(dirpath, name), out_dir).replace("\\", "/")
-            if rel != "report.json":
+            if rel not in ("report.json", RESPONSE_FILE):
                 result.append(rel)
     return sorted(result)
 
@@ -252,28 +256,43 @@ def make_plugin(skill):
     return tmp
 
 
-def build_prompt(skill, target, out_dir, config, allow_changes):
-    fields = {"skill": f"{PLUGIN_NAME}:{skill}", "target": target, "out_dir": out_dir}
-    if config.get("prompt"):
+def build_prompt(skill, target, out_dir, config, allow_changes, user_prompt=""):
+    """지시문 본문은 실행 때 준 프롬프트 → tests/<스킬>.json 의 prompt → 기본 지시문 순으로 고른다."""
+    fields = {"skill": f"{PLUGIN_NAME}:{skill}", "target": target or "", "out_dir": out_dir}
+    kind = "파일" if target and os.path.isfile(target) else "폴더"
+    user_prompt = (user_prompt or "").strip()
+    if user_prompt:
+        # 직접 쓴 글에는 중괄호가 섞일 수 있으니 format 대신 아는 자리만 바꾼다
+        body = user_prompt
+        for key, value in fields.items():
+            body = body.replace("{" + key + "}", value)
+        if target and "{target}" not in user_prompt:
+            body += f"\n- 대상 {kind}: {target}"
+    elif config.get("prompt"):
         body = config["prompt"].format(**fields)
-    else:
-        kind = "파일" if os.path.isfile(target) else "폴더"
+    elif target:
         body = (f"{fields['skill']} 스킬을 사용해서 다음 {kind}에 대해 스킬이 하는 작업을 수행해줘.\n"
                 f"- 대상 {kind}: {target}")
+    else:
+        body = f"{fields['skill']} 스킬을 사용해서 스킬이 하는 작업을 수행해줘."
     rules = [f"- 반드시 {fields['skill']} 스킬을 Skill 도구로 불러서 그 지시대로 진행할 것",
-             f"- 결과물은 모두 {out_dir} 에 저장할 것",
+             f"- 파일로 만드는 결과물은 모두 {out_dir} 에 저장할 것",
              "- 사용자에게 묻지 말고 합리적인 기본값으로 끝까지 진행할 것 (이 실행은 비대화형 테스트다)",
              "- 브라우저나 뷰어를 직접 열지 말 것 (테스트 프로그램이 연다)"]
-    if not allow_changes:
+    if target and not allow_changes:
         rules.append("- 대상 폴더/파일 안에는 아무 파일도 만들거나 고치지 말 것")
     rules.append("- 마지막에 만든 결과물 파일 목록과 각 파일의 역할을 짧게 정리할 것")
     return body + "\n" + "\n".join(rules)
 
 
 def run_claude(claude, prompt, target, out_dir, plugin_dir, log, on_proc=None):
-    add_dir = target if os.path.isdir(target) else os.path.dirname(target)
+    # 대상이 없으면 결과 폴더에서 실행한다 — 이 프로그램 폴더에 파일이 생기지 않게
+    add_dirs, cwd = ["--add-dir", out_dir], out_dir
+    if target:
+        add_dirs = ["--add-dir", target if os.path.isdir(target) else os.path.dirname(target)] + add_dirs
+        cwd = HERE
     # 프롬프트는 표준입력으로 넘긴다 — Windows의 claude.cmd(cmd.exe)는 인자 속 줄바꿈에서 명령줄을 끊는다
-    cmd = [claude, "-p", "--add-dir", add_dir, "--add-dir", out_dir, "--plugin-dir", plugin_dir,
+    cmd = [claude, "-p", *add_dirs, "--plugin-dir", plugin_dir,
            "--permission-mode", "acceptEdits",
            "--allowedTools", "Read", "Glob", "Grep", "Write", "Edit", "Skill", "Bash", "TodoWrite",
            "--output-format", "stream-json", "--verbose"]
@@ -281,7 +300,7 @@ def run_claude(claude, prompt, target, out_dir, plugin_dir, log, on_proc=None):
     emit = log.write
     log.write("명령: " + subprocess.list2cmdline(cmd), echo=False)
 
-    proc = subprocess.Popen(cmd, cwd=HERE, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace",
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if on_proc:
@@ -325,9 +344,11 @@ def run_claude(claude, prompt, target, out_dir, plugin_dir, log, on_proc=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="skills/의 스킬을 골라 폴더·파일에 적용해 보고 결과물을 검사한다.")
+    parser = argparse.ArgumentParser(description="skills/의 스킬을 골라 폴더, 파일, 프롬프트로 실행해 보고 결과물을 검사한다.")
     parser.add_argument("--skill", help="skills/ 아래 스킬 이름 (주면 선택 창을 건너뛴다)")
     parser.add_argument("--target", help="작업할 폴더나 파일 (주면 탐색기를 건너뛴다)")
+    parser.add_argument("--prompt", help="Claude에게 줄 지시문. 주면 대상 없이도 실행한다")
+    parser.add_argument("--prompt-file", help="지시문을 담은 텍스트 파일 (--prompt 대신)")
     parser.add_argument("--no-open", action="store_true", help="끝나고 결과를 열지 않는다")
     args = parser.parse_args()
     for stream in (sys.stdout, sys.stderr):
@@ -350,17 +371,19 @@ def main():
         log.close()
 
 
-def execute(claude, skill, target, stamp, log, config, on_proc=None):
-    """3~4단계 — 스킬을 대상에 적용하고 결과를 검사해 report(dict)를 돌려준다. report.json도 저장한다."""
-    target_name = os.path.splitext(os.path.basename(target))[0] or "target"
+def execute(claude, skill, target, stamp, log, config, on_proc=None, user_prompt=""):
+    """3~4단계 — 스킬을 대상(없으면 프롬프트만)으로 실행하고 결과를 검사해 report(dict)를 돌려준다.
+    report.json도 저장한다."""
+    target = target or None
+    target_name = (os.path.splitext(os.path.basename(target))[0] or "target") if target else "prompt"
     log.open(f"{skill}_{target_name}")
     out_dir = os.path.join(RESULTS_DIR, skill, f"{target_name}_{stamp}")
     os.makedirs(out_dir, exist_ok=True)
     allow_changes = bool(config.get("allow_target_changes"))
-    prompt = build_prompt(skill, target, out_dir, config, allow_changes)
+    prompt = build_prompt(skill, target, out_dir, config, allow_changes, user_prompt)
 
     log.write(f"스킬: {skill}")
-    log.write(f"대상: {target}")
+    log.write(f"대상: {target or '없음 (프롬프트만)'}")
     log.write(f"결과: {out_dir}")
     log.write(f"로그: {log.path}\n")
     log.write("지시문:\n" + prompt, echo=False)
@@ -368,9 +391,10 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None):
     # 3. 실행
     # 대상이 이 프로그램 폴더를 품고 있으면, 실행 중 우리가 쓰는 결과·로그는 변경으로 치지 않는다
     own_dirs = (RESULTS_DIR, LOGS_DIR)
-    before = snapshot(target, own_dirs)
-    log.write(f"대상 스냅샷(실행 전): {'파일 ' + str(len(before)) + '개' if before is not None else '너무 커서 생략'}",
-              echo=False)
+    before = snapshot(target, own_dirs) if target else None
+    if target:
+        log.write(f"대상 스냅샷(실행 전): {'파일 ' + str(len(before)) + '개' if before is not None else '너무 커서 생략'}",
+                  echo=False)
     plugin_dir = make_plugin(skill)
     log.write(f"임시 플러그인: {plugin_dir}", echo=False)
     started = time.time()
@@ -379,7 +403,10 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None):
     finally:
         shutil.rmtree(plugin_dir, ignore_errors=True)
     log.write(f"claude 종료 코드: {summary.get('exit_code')}", echo=False)
-    after = snapshot(target, own_dirs)
+    after = snapshot(target, own_dirs) if target else None
+    response = os.path.join(out_dir, RESPONSE_FILE)
+    with open(response, "w", encoding="utf-8") as f:
+        f.write(summary.get("final_text") or "")
 
     # 4. 결과 검사
     outputs = list_outputs(out_dir)
@@ -390,15 +417,16 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None):
     checks = {
         "Claude 실행 성공": summary.get("exit_code") == 0 and not (summary.get("result") or {}).get("is_error", True),
         "스킬 호출됨": summary["skill_invoked"],
-        "결과물 생성됨": bool(outputs),
+        # 프롬프트만 주는 스킬은 답이 글(response.md)일 수 있으니, 파일이 없으면 건너뜀으로 둔다
+        "결과물 생성됨": bool(outputs) if target or outputs else None,
         **{f"기대 결과물 {p}": bool(found) for p, found in expect_results.items()},
     }
-    if not allow_changes:
+    if target and not allow_changes:
         checks["대상 변경 없음"] = not changed if target_changes is not None else None
 
     report = {
         "skill": skill, "target": target, "out_dir": out_dir, "started": stamp,
-        "elapsed_sec": round(time.time() - started), "prompt": prompt,
+        "elapsed_sec": round(time.time() - started), "prompt": prompt, "response": response,
         "passed": all(v is not False for v in checks.values()),
         "checks": checks, "outputs": outputs, "expect": expect_results,
         "target_changes": target_changes, "claude": summary,
@@ -423,7 +451,11 @@ def execute(claude, skill, target, stamp, log, config, on_proc=None):
 
 
 def run(args, stamp, log):
-    headless = bool(args.skill and args.target)
+    user_prompt = args.prompt or ""
+    if args.prompt_file:
+        with open(args.prompt_file, encoding="utf-8") as f:
+            user_prompt = f.read()
+    headless = bool(args.skill and (args.target or user_prompt.strip()))
 
     def fail(message):
         log.write(f"[오류] {message}")
@@ -462,15 +494,17 @@ def run(args, stamp, log):
         target = os.path.normpath(os.path.abspath(args.target))
         if not os.path.exists(target):
             return fail(f"대상이 없습니다: {target}")
+    elif user_prompt.strip() or config.get("target") == "none":
+        target = None  # 대상 없이 프롬프트만으로 실행
     else:
         target = choose_target(config.get("target", "any"), skill)
-    if not target:
-        log.write("대상을 선택하지 않아 종료합니다.")
-        return
+        if not target:
+            log.write("대상을 선택하지 않아 종료합니다.")
+            return
     if root:
         root.destroy()
 
-    report = execute(claude, skill, target, stamp, log, config)
+    report = execute(claude, skill, target, stamp, log, config, user_prompt=user_prompt)
 
     # 5. 결과 열기
     if args.no_open:
@@ -487,6 +521,8 @@ def open_results(report, config, log=None):
     if to_open:
         for rel in to_open:
             webbrowser.open("file:///" + os.path.join(out_dir, rel).replace("\\", "/"))
+    elif not outputs and os.path.isfile(report.get("response") or ""):
+        os.startfile(report["response"])  # 파일 결과물 없이 글로 답한 스킬은 응답을 연다
     else:
         os.startfile(out_dir)
 
