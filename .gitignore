@@ -1,0 +1,11 @@
+# 실행 로그 · 테스트 결과 · 테스트할 스킬 — 내용은 올리지 않고 폴더만 남긴다(.gitkeep)
+logs/*
+!logs/.gitkeep
+results/*
+!results/.gitkeep
+skills/*
+!skills/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
